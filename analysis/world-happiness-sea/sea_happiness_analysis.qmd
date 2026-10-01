@@ -1,0 +1,353 @@
+---
+title: "World Happiness in Southeast Asia"
+subtitle: "An analysis of World Happiness Report data for the 11 Southeast Asian countries"
+format:
+  html:
+    toc: true
+    code-fold: true
+    code-summary: "Show code"
+    embed-resources: true
+    fig-width: 8
+    fig-height: 5
+execute:
+  warning: false
+jupyter: python3
+---
+
+## Setup
+
+Set `DATA_FILES` to your World Happiness Report data before rendering. Either
+layout works:
+
+- **Panel data** (all years): `DataForTable2.1.xls` from
+  <https://worldhappiness.report/data/>, or Kaggle's `world-happiness-report.csv`.
+- **Single-year files**: Kaggle's `world-happiness-report-2021.csv`, or
+  `2015.csv` ... `2019.csv`. List several and the year is read from each file name.
+
+```{python}
+#| label: parameters
+#| tags: [parameters]
+#| code-fold: false
+
+DATA_FILES = ["DataForTable2.1.xls"]
+```
+
+```{python}
+#| label: setup
+import re
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import pandas as pd
+from IPython.display import Markdown
+from matplotlib.ticker import MaxNLocator
+
+# Canonical name -> spellings used across WHR editions / other datasets.
+SEA_COUNTRIES = {
+	"Brunei": ["brunei", "brunei darussalam"],
+	"Cambodia": ["cambodia"],
+	"Indonesia": ["indonesia"],
+	"Laos": ["laos", "lao pdr", "lao people's democratic republic"],
+	"Malaysia": ["malaysia"],
+	"Myanmar": ["myanmar", "burma"],
+	"Philippines": ["philippines", "the philippines"],
+	"Singapore": ["singapore"],
+	"Thailand": ["thailand"],
+	"Timor-Leste": ["timor-leste", "east timor", "timor leste"],
+	"Vietnam": ["vietnam", "viet nam"],
+}
+ALIAS_TO_COUNTRY = {
+	alias: name for name, aliases in SEA_COUNTRIES.items() for alias in aliases
+}
+
+# Standard column -> names it appears under in different WHR files.
+COLUMN_ALIASES = {
+	"country": ["country name", "country", "country or region"],
+	"year": ["year"],
+	"score": [
+		"life ladder", "ladder score", "life evaluation", "happiness score",
+		"score",
+	],
+	"gdp": [
+		"log gdp per capita", "logged gdp per capita",
+		"economy (gdp per capita)", "gdp per capita",
+	],
+	"social_support": ["social support", "family"],
+	"life_expectancy": [
+		"healthy life expectancy at birth", "healthy life expectancy",
+		"health (life expectancy)",
+	],
+	"freedom": ["freedom to make life choices", "freedom"],
+	"generosity": ["generosity"],
+	"corruption": [
+		"perceptions of corruption", "trust (government corruption)",
+	],
+}
+
+FACTORS = [
+	"gdp", "social_support", "life_expectancy", "freedom", "generosity",
+	"corruption",
+]
+FACTOR_LABELS = {
+	"score": "Happiness score",
+	"gdp": "GDP per capita",
+	"social_support": "Social support",
+	"life_expectancy": "Healthy life expectancy",
+	"freedom": "Freedom of choice",
+	"generosity": "Generosity",
+	"corruption": "Perceived corruption",
+}
+
+# Chart colours: one hue for magnitude, a two-pole pair for +/- correlation.
+BLUE = "#2a78d6"
+ORANGE = "#eb6834"
+GRAY = "#b5b3ad"
+TEXT = "#0b0b0b"
+TEXT_MUTED = "#52514e"
+
+
+def style_axes(ax):
+	for side in ("top", "right"):
+		ax.spines[side].set_visible(False)
+	for side in ("left", "bottom"):
+		ax.spines[side].set_color(GRAY)
+	ax.tick_params(colors=TEXT_MUTED, labelsize=9)
+	ax.title.set_color(TEXT)
+
+
+def load_file(path: Path) -> pd.DataFrame:
+	if path.suffix.lower() in (".xls", ".xlsx"):
+		df = pd.read_excel(path)
+	else:
+		df = pd.read_csv(path)
+	lookup = {c.strip().lower(): c for c in df.columns}
+	rename = {}
+	for std, aliases in COLUMN_ALIASES.items():
+		for alias in aliases:
+			if alias in lookup:
+				rename[lookup[alias]] = std
+				break
+	df = df.rename(columns=rename)
+	df = df[[c for c in COLUMN_ALIASES if c in df.columns]]
+	missing = {"country", "score"} - set(df.columns)
+	if missing:
+		raise ValueError(f"{path}: could not find column(s) {sorted(missing)}")
+	if "year" not in df.columns:
+		match = re.search(r"(19|20)\d{2}", path.stem)
+		if not match:
+			raise ValueError(f"{path}: no 'year' column and no year in the file name")
+		df["year"] = int(match.group(0))
+	return df
+```
+
+## Data
+
+```{python}
+#| label: load
+world = pd.concat([load_file(Path(p)) for p in DATA_FILES], ignore_index=True)
+world["year"] = world["year"].astype(int)
+world["country"] = world["country"].astype(str).str.strip()
+canonical = world["country"].str.lower().map(ALIAS_TO_COUNTRY)
+world["is_sea"] = canonical.notna()
+world.loc[world["is_sea"], "country"] = canonical[world["is_sea"]]
+
+sea = world[world["is_sea"]].copy()
+if sea.empty:
+	raise ValueError("No Southeast Asian countries found in the data.")
+
+factors = [f for f in FACTORS if f in sea.columns]
+latest_year = int(sea["year"].max())
+multi_year = sea["year"].nunique() > 1
+missing = sorted(set(SEA_COUNTRIES) - set(sea["country"]))
+```
+
+```{python}
+#| label: data-summary
+#| output: asis
+lines = [
+	f"The data has **{len(sea)} Southeast Asian rows** covering "
+	f"**{sea['country'].nunique()} countries** from "
+	f"{sea['year'].min()} to {latest_year}."
+]
+if missing:
+	lines.append(f"Not in the data: {', '.join(missing)}.")
+Markdown(" ".join(lines))
+```
+
+## Ranking in `{python} latest_year`
+
+```{python}
+#| label: ranking-table
+world_latest = world[world["year"] == latest_year].copy()
+world_latest["world_rank"] = world_latest["score"].rank(
+	ascending=False, method="min").astype(int)
+ranking = (world_latest[world_latest["is_sea"]]
+	.sort_values("score", ascending=False)
+	.reset_index(drop=True))
+ranking.insert(0, "sea_rank", range(1, len(ranking) + 1))
+ranking = ranking[["sea_rank", "world_rank", "country", "score"] + factors]
+
+no_latest = sorted(set(sea["country"]) - set(ranking["country"]))
+
+# Factor values per country are in the heatmap below.
+(ranking[["sea_rank", "world_rank", "country", "score"]]
+	.rename(columns={"sea_rank": "Regional rank", "world_rank": "World rank",
+		"country": "Country", "score": "Happiness score"})
+	.style.hide(axis="index").format(precision=2))
+```
+
+```{python}
+#| label: no-latest-note
+#| output: asis
+Markdown(
+	f"No {latest_year} data for {', '.join(no_latest)}; they are left out of "
+	"the ranking, heatmap and scatter plot." if no_latest else "")
+```
+
+```{python}
+#| label: fig-ranking
+#| fig-cap: "Happiness score by country in the latest year."
+data = ranking.sort_values("score")
+fig, ax = plt.subplots()
+bars = ax.barh(data["country"], data["score"], color=BLUE, height=0.6)
+ax.bar_label(bars, fmt="%.2f", padding=4, color=TEXT_MUTED, fontsize=9)
+ax.set_xlabel("Happiness score (0-10)", color=TEXT_MUTED)
+ax.set_xlim(0, max(10, data["score"].max() + 0.8))
+ax.grid(axis="x", color=GRAY, alpha=0.3)
+ax.set_axisbelow(True)
+style_axes(ax)
+plt.show()
+```
+
+## Southeast Asia vs. the rest of the world
+
+Mean of each measure in `{python} latest_year`.
+
+```{python}
+#| label: sea-vs-world
+cols = ["score"] + factors
+comparison = pd.DataFrame({
+	"Southeast Asia": world_latest[world_latest["is_sea"]][cols].mean(),
+	"Rest of world": world_latest[~world_latest["is_sea"]][cols].mean(),
+})
+comparison["Difference"] = comparison["Southeast Asia"] - comparison["Rest of world"]
+comparison.rename(index=FACTOR_LABELS).style.format(precision=3)
+```
+
+## Happiness factors by country
+
+```{python}
+#| label: fig-heatmap
+#| fig-cap: "Factor values per country (rows ordered by happiness score). Shading is relative to the region: lightest = lowest, darkest = highest."
+#| fig-height: 5.5
+data = ranking.set_index("country")[factors]
+scaled = (data - data.min()) / (data.max() - data.min())
+fig, ax = plt.subplots(figsize=(9, 5.5))
+im = ax.imshow(scaled.values, cmap="Blues", aspect="auto", vmin=0, vmax=1)
+ax.set_xticks(range(len(factors)))
+ax.set_xticklabels([FACTOR_LABELS[f] for f in factors], rotation=30, ha="right")
+ax.set_yticks(range(len(data)))
+ax.set_yticklabels(data.index)
+for i in range(data.shape[0]):
+	for j in range(data.shape[1]):
+		value = data.iat[i, j]
+		if pd.notna(value):
+			dark = scaled.iat[i, j] > 0.6
+			ax.text(j, i, f"{value:.2f}", ha="center", va="center",
+				fontsize=8, color="white" if dark else TEXT)
+style_axes(ax)
+plt.show()
+```
+
+## What goes with happiness?
+
+Correlation of each factor with the happiness score, across all Southeast Asian
+rows in the data.
+
+```{python}
+#| label: fig-correlations
+#| fig-cap: "Correlation of each factor with the happiness score. Blue = positive, orange = negative."
+#| fig-height: 4
+corr = (sea[factors + ["score"]].corr()["score"]
+	.drop("score").sort_values())
+fig, ax = plt.subplots(figsize=(7, 4))
+bars = ax.barh([FACTOR_LABELS[f] for f in corr.index], corr.values,
+	color=[BLUE if v >= 0 else ORANGE for v in corr], height=0.6)
+ax.bar_label(bars, fmt="%+.2f", padding=4, color=TEXT_MUTED, fontsize=9)
+ax.axvline(0, color=GRAY, linewidth=1)
+ax.set_xlim(-1.15, 1.15)
+ax.set_xlabel("Correlation with happiness score", color=TEXT_MUTED)
+style_axes(ax)
+plt.show()
+```
+
+```{python}
+#| label: fig-gdp
+#| fig-cap: "GDP per capita vs. happiness score in the latest year."
+latest = ranking.dropna(subset=["gdp", "score"]) if "gdp" in factors else None
+if latest is not None:
+	fig, ax = plt.subplots(figsize=(7.5, 5))
+	ax.scatter(latest["gdp"], latest["score"], s=60, color=BLUE,
+		edgecolor="white", linewidth=1.5, zorder=3)
+	for _, row in latest.iterrows():
+		ax.annotate(row["country"], (row["gdp"], row["score"]),
+			xytext=(6, 4), textcoords="offset points", fontsize=9,
+			color=TEXT_MUTED)
+	ax.set_xlabel("GDP per capita (as reported in the source data)",
+		color=TEXT_MUTED)
+	ax.set_ylabel("Happiness score", color=TEXT_MUTED)
+	ax.grid(color=GRAY, alpha=0.3)
+	style_axes(ax)
+	plt.show()
+```
+
+## Trends over time
+
+Happiness score per country (blue) against the Southeast Asian mean (gray).
+
+```{python}
+#| label: trends
+#| fig-width: 12
+#| fig-height: 8
+if not multi_year:
+	display(Markdown("The data covers a single year, so there are no trends to show."))
+else:
+	regional = sea.groupby("year")["score"].mean()
+	countries = sorted(sea["country"].unique())
+	ncols = 4
+	nrows = -(-len(countries) // ncols)
+	fig, axes = plt.subplots(nrows, ncols, figsize=(12, 2.6 * nrows),
+		sharex=True, sharey=True)
+	axes = axes.flatten()
+	for ax, country in zip(axes, countries):
+		series = sea[sea["country"] == country].sort_values("year")
+		ax.plot(regional.index, regional.values, color=GRAY, linewidth=2)
+		ax.plot(series["year"], series["score"], color=BLUE, linewidth=2,
+			marker="o", markersize=3)
+		ax.set_title(country, loc="left", fontsize=10)
+		ax.xaxis.set_major_locator(MaxNLocator(nbins=4, integer=True))
+		ax.tick_params(labelbottom=True)
+		ax.grid(color=GRAY, alpha=0.25)
+		style_axes(ax)
+	for ax in axes[len(countries):]:
+		ax.set_visible(False)
+	fig.legend(handles=[
+		plt.Line2D([], [], color=BLUE, linewidth=2, label="Country"),
+		plt.Line2D([], [], color=GRAY, linewidth=2, label="SEA mean"),
+	], loc="upper right", frameon=False)
+	fig.tight_layout(rect=(0, 0, 1, 0.95))
+	plt.show()
+```
+
+```{python}
+#| label: score-change
+if multi_year:
+	ordered = sea.sort_values("year").groupby("country")
+	first, last = ordered.first(), ordered.last()
+	change = pd.DataFrame({
+		"First year": first["year"], "First score": first["score"],
+		"Last year": last["year"], "Last score": last["score"],
+		"Change": last["score"] - first["score"],
+	}).sort_values("Change", ascending=False)
+	display(change.style.format(precision=2))
+```

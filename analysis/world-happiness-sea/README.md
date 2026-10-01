@@ -38,3 +38,15 @@ Printed to the console and saved in `--out`:
 | `03_factor_correlations.png` | factor correlations |
 | `04_gdp_vs_happiness.png` | GDP vs happiness scatter |
 | `05_trends.png` | per-country trend vs regional mean (multi-year data) |
+
+## Quarto report
+
+`sea_happiness_analysis.qmd` runs the same analysis as a Quarto document. Set
+`DATA_FILES` in its first code cell (or pass it as a parameter), then:
+
+```bash
+pip install jupyter pandas matplotlib openpyxl xlrd
+quarto render sea_happiness_analysis.qmd
+# or, without editing the file (needs `pip install papermill`):
+quarto render sea_happiness_analysis.qmd -P DATA_FILES:"['DataForTable2.1.xls']"
+```

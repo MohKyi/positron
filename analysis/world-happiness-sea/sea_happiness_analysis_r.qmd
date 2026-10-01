@@ -1,0 +1,349 @@
+---
+title: "World Happiness in Southeast Asia"
+subtitle: "An analysis of World Happiness Report data for the 11 Southeast Asian countries (R)"
+format:
+  html:
+    toc: true
+    code-fold: true
+    code-summary: "Show code"
+    embed-resources: true
+    fig-width: 8
+    fig-height: 5
+execute:
+  warning: false
+  message: false
+params:
+  data_files: "DataForTable2.1.xls"
+---
+
+## Setup
+
+Set `data_files` in the YAML header to your World Happiness Report data, or pass
+it when rendering. Separate several files with commas. Either layout works:
+
+- **Panel data** (all years): `DataForTable2.1.xls` from
+  <https://worldhappiness.report/data/>, or Kaggle's `world-happiness-report.csv`.
+- **Single-year files**: Kaggle's `world-happiness-report-2021.csv`, or
+  `2015.csv` ... `2019.csv`. List several and the year is read from each file name.
+
+```{r}
+#| label: setup
+library(dplyr)
+library(tidyr)
+library(readr)
+library(readxl)
+library(stringr)
+library(purrr)
+library(ggplot2)
+library(knitr)
+
+data_files <- str_trim(str_split_1(params$data_files, ","))
+
+# Canonical name -> spellings used across WHR editions / other datasets.
+sea_countries <- list(
+	"Brunei" = c("brunei", "brunei darussalam"),
+	"Cambodia" = c("cambodia"),
+	"Indonesia" = c("indonesia"),
+	"Laos" = c("laos", "lao pdr", "lao people's democratic republic"),
+	"Malaysia" = c("malaysia"),
+	"Myanmar" = c("myanmar", "burma"),
+	"Philippines" = c("philippines", "the philippines"),
+	"Singapore" = c("singapore"),
+	"Thailand" = c("thailand"),
+	"Timor-Leste" = c("timor-leste", "east timor", "timor leste"),
+	"Vietnam" = c("vietnam", "viet nam")
+)
+alias_to_country <- setNames(
+	rep(names(sea_countries), lengths(sea_countries)),
+	unlist(sea_countries, use.names = FALSE)
+)
+
+# Standard column -> names it appears under in different WHR files.
+column_aliases <- list(
+	country = c("country name", "country", "country or region"),
+	year = c("year"),
+	score = c("life ladder", "ladder score", "life evaluation",
+		"happiness score", "score"),
+	gdp = c("log gdp per capita", "logged gdp per capita",
+		"economy (gdp per capita)", "gdp per capita"),
+	social_support = c("social support", "family"),
+	life_expectancy = c("healthy life expectancy at birth",
+		"healthy life expectancy", "health (life expectancy)"),
+	freedom = c("freedom to make life choices", "freedom"),
+	generosity = c("generosity"),
+	corruption = c("perceptions of corruption",
+		"trust (government corruption)")
+)
+
+factor_labels <- c(
+	score = "Happiness score",
+	gdp = "GDP per capita",
+	social_support = "Social support",
+	life_expectancy = "Healthy life expectancy",
+	freedom = "Freedom of choice",
+	generosity = "Generosity",
+	corruption = "Perceived corruption"
+)
+all_factors <- names(factor_labels)[-1]
+
+# Chart colours: one hue for magnitude, a two-pole pair for +/- correlation.
+blue <- "#2a78d6"
+orange <- "#eb6834"
+gray <- "#b5b3ad"
+text_muted <- "#52514e"
+
+theme_set(
+	theme_minimal(base_size = 11) +
+	theme(
+		panel.grid.minor = element_blank(),
+		panel.grid.major = element_line(colour = scales::alpha(gray, 0.35)),
+		axis.text = element_text(colour = text_muted),
+		axis.title = element_text(colour = text_muted),
+		plot.title.position = "plot"
+	)
+)
+
+load_file <- function(path) {
+	df <- if (str_detect(tolower(path), "\\.xlsx?$")) {
+		read_excel(path)
+	} else {
+		read_csv(path, show_col_types = FALSE)
+	}
+	lookup <- setNames(names(df), str_trim(tolower(names(df))))
+	out <- list()
+	for (std in names(column_aliases)) {
+		hit <- intersect(column_aliases[[std]], names(lookup))
+		if (length(hit) > 0) {
+			out[[std]] <- df[[lookup[[hit[1]]]]]
+		}
+	}
+	out <- as_tibble(out)
+	missing <- setdiff(c("country", "score"), names(out))
+	if (length(missing) > 0) {
+		stop(path, ": could not find column(s) ", paste(missing, collapse = ", "))
+	}
+	if (!"year" %in% names(out)) {
+		year <- str_extract(basename(path), "(19|20)\\d{2}")
+		if (is.na(year)) {
+			stop(path, ": no 'year' column and no year in the file name")
+		}
+		out$year <- as.integer(year)
+	}
+	out
+}
+```
+
+## Data
+
+```{r}
+#| label: load
+world <- map(data_files, load_file) |>
+	bind_rows() |>
+	mutate(
+		year = as.integer(year),
+		country = str_trim(as.character(country)),
+		canonical = unname(alias_to_country[tolower(country)]),
+		is_sea = !is.na(canonical),
+		country = coalesce(canonical, country)
+	) |>
+	select(-canonical)
+
+sea <- filter(world, is_sea)
+if (nrow(sea) == 0) stop("No Southeast Asian countries found in the data.")
+
+factors <- intersect(all_factors, names(sea))
+latest_year <- max(sea$year)
+multi_year <- n_distinct(sea$year) > 1
+missing <- setdiff(names(sea_countries), unique(sea$country))
+```
+
+The data has **`r nrow(sea)` Southeast Asian rows** covering
+**`r n_distinct(sea$country)` countries** from `r min(sea$year)` to
+`r latest_year`.
+`r if (length(missing) > 0) paste0("Not in the data: ", paste(missing, collapse = ", "), ".")`
+
+## Ranking in `r latest_year`
+
+```{r}
+#| label: ranking-table
+world_latest <- world |>
+	filter(year == latest_year) |>
+	mutate(world_rank = min_rank(desc(score)))
+
+ranking <- world_latest |>
+	filter(is_sea) |>
+	arrange(desc(score)) |>
+	mutate(sea_rank = row_number()) |>
+	select(sea_rank, world_rank, country, score, all_of(factors))
+
+no_latest <- setdiff(unique(sea$country), ranking$country)
+
+# Factor values per country are in the heatmap below.
+ranking |>
+	select(sea_rank, world_rank, country, score) |>
+	kable(
+		col.names = c("Regional rank", "World rank", "Country", "Happiness score"),
+		digits = 2
+	)
+```
+
+`r if (length(no_latest) > 0) paste0("No ", latest_year, " data for ", paste(no_latest, collapse = ", "), "; they are left out of the ranking, heatmap and scatter plot.")`
+
+```{r}
+#| label: fig-ranking
+#| fig-cap: "Happiness score by country in the latest year."
+ggplot(ranking, aes(x = score, y = reorder(country, score))) +
+	geom_col(fill = blue, width = 0.6) +
+	geom_text(aes(label = sprintf("%.2f", score)), hjust = -0.2,
+		size = 3.2, colour = text_muted) +
+	scale_x_continuous(limits = c(0, max(10, max(ranking$score) + 0.8)),
+		expand = expansion(mult = c(0, 0.02))) +
+	labs(x = "Happiness score (0-10)", y = NULL) +
+	theme(panel.grid.major.y = element_blank())
+```
+
+## Southeast Asia vs. the rest of the world
+
+Mean of each measure in `r latest_year`.
+
+```{r}
+#| label: sea-vs-world
+world_latest |>
+	select(is_sea, score, all_of(factors)) |>
+	pivot_longer(-is_sea, names_to = "measure") |>
+	group_by(measure, is_sea) |>
+	summarise(mean = mean(value, na.rm = TRUE), .groups = "drop") |>
+	pivot_wider(names_from = is_sea, values_from = mean) |>
+	transmute(
+		Measure = factor_labels[measure],
+		`Southeast Asia` = `TRUE`,
+		`Rest of world` = `FALSE`,
+		Difference = `TRUE` - `FALSE`,
+		order = match(measure, names(factor_labels))
+	) |>
+	arrange(order) |>
+	select(-order) |>
+	kable(digits = 3)
+```
+
+## Happiness factors by country
+
+```{r}
+#| label: fig-heatmap
+#| fig-cap: "Factor values per country (rows ordered by happiness score). Shading is relative to the region: lightest = lowest, darkest = highest."
+#| fig-width: 9
+#| fig-height: 5.5
+ranking |>
+	select(country, score, all_of(factors)) |>
+	pivot_longer(all_of(factors), names_to = "factor") |>
+	group_by(factor) |>
+	mutate(scaled = (value - min(value, na.rm = TRUE)) /
+		(max(value, na.rm = TRUE) - min(value, na.rm = TRUE))) |>
+	ungroup() |>
+	mutate(
+		factor = factor(factor_labels[factor], levels = factor_labels[factors]),
+		country = reorder(country, score)
+	) |>
+	ggplot(aes(x = factor, y = country, fill = scaled)) +
+	geom_tile(colour = "white", linewidth = 1) +
+	geom_text(aes(label = sprintf("%.2f", value),
+		colour = scaled > 0.6), size = 3) +
+	scale_fill_distiller(palette = "Blues", direction = 1, limits = c(0, 1),
+		name = "Relative to\nregion") +
+	scale_colour_manual(values = c(`TRUE` = "white", `FALSE` = "#0b0b0b"),
+		guide = "none") +
+	labs(x = NULL, y = NULL) +
+	theme(
+		panel.grid = element_blank(),
+		axis.text.x = element_text(angle = 30, hjust = 1)
+	)
+```
+
+## What goes with happiness?
+
+Correlation of each factor with the happiness score, across all Southeast Asian
+rows in the data.
+
+```{r}
+#| label: fig-correlations
+#| fig-cap: "Correlation of each factor with the happiness score. Blue = positive, orange = negative."
+#| fig-width: 7
+#| fig-height: 4
+corr <- tibble(
+	factor = factors,
+	r = map_dbl(factors, \(f) cor(sea[[f]], sea$score, use = "complete.obs"))
+) |>
+	mutate(label = factor_labels[factor])
+
+ggplot(corr, aes(x = r, y = reorder(label, r), fill = r >= 0)) +
+	geom_col(width = 0.6) +
+	geom_vline(xintercept = 0, colour = gray) +
+	geom_text(aes(label = sprintf("%+.2f", r), hjust = ifelse(r >= 0, -0.2, 1.2)),
+		size = 3.2, colour = text_muted) +
+	scale_fill_manual(values = c(`TRUE` = blue, `FALSE` = orange), guide = "none") +
+	scale_x_continuous(limits = c(-1.15, 1.15)) +
+	labs(x = "Correlation with happiness score", y = NULL) +
+	theme(panel.grid.major.y = element_blank())
+```
+
+```{r}
+#| label: fig-gdp
+#| fig-cap: "GDP per capita vs. happiness score in the latest year."
+#| fig-width: 7.5
+if ("gdp" %in% factors) {
+	ranking |>
+		filter(!is.na(gdp), !is.na(score)) |>
+		ggplot(aes(x = gdp, y = score)) +
+		geom_point(colour = "white", size = 4) +
+		geom_point(colour = blue, size = 3) +
+		geom_text(aes(label = country), hjust = -0.15, vjust = -0.4,
+			size = 3.2, colour = text_muted) +
+		scale_x_continuous(expand = expansion(mult = c(0.05, 0.15))) +
+		labs(x = "GDP per capita (as reported in the source data)",
+			y = "Happiness score")
+}
+```
+
+## Trends over time
+
+Happiness score per country (blue) against the Southeast Asian mean (gray).
+
+```{r}
+#| label: trends
+#| results: asis
+#| fig-width: 10
+#| fig-height: 7
+if (!multi_year) {
+	cat("The data covers a single year, so there are no trends to show.")
+} else {
+	regional <- sea |>
+		group_by(year) |>
+		summarise(score = mean(score, na.rm = TRUE))
+
+	ggplot(sea, aes(x = year, y = score)) +
+		geom_line(data = regional, colour = gray, linewidth = 0.9) +
+		geom_line(colour = blue, linewidth = 0.9) +
+		geom_point(colour = blue, size = 1) +
+		facet_wrap(~ country, ncol = 4) +
+		scale_x_continuous(breaks = scales::breaks_pretty(4)) +
+		labs(x = NULL, y = "Happiness score") +
+		theme(strip.text = element_text(hjust = 0, size = 10))
+}
+```
+
+```{r}
+#| label: score-change
+if (multi_year) {
+	sea |>
+		group_by(country) |>
+		arrange(year, .by_group = TRUE) |>
+		summarise(
+			`First year` = first(year), `First score` = first(score),
+			`Last year` = last(year), `Last score` = last(score)
+		) |>
+		mutate(Change = `Last score` - `First score`) |>
+		arrange(desc(Change)) |>
+		rename(Country = country) |>
+		kable(digits = 2)
+}
+```

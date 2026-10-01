@@ -50,3 +50,20 @@ quarto render sea_happiness_analysis.qmd
 # or, without editing the file (needs `pip install papermill`):
 quarto render sea_happiness_analysis.qmd -P DATA_FILES:"['DataForTable2.1.xls']"
 ```
+
+## Quarto report (R)
+
+`sea_happiness_analysis_r.qmd` is the same report written in R (dplyr, tidyr,
+readr, readxl, ggplot2, knitr). Set `data_files` in its YAML header, or pass it
+when rendering; separate several files with commas.
+
+```r
+install.packages(c("dplyr", "tidyr", "readr", "readxl", "stringr", "purrr",
+	"ggplot2", "scales", "knitr", "rmarkdown"))
+```
+
+```bash
+quarto render sea_happiness_analysis_r.qmd
+quarto render sea_happiness_analysis_r.qmd -P data_files:DataForTable2.1.xls
+quarto render sea_happiness_analysis_r.qmd -P data_files:"2018.csv,2019.csv"
+```
